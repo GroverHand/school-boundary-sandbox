@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>School Boundary Sandbox</title>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css"/>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.css"/>
+  <style>
+    html, body { height:100%; margin:0; font-family: Arial, sans-serif; }
+    #map { height:88vh; }
+    #topbar { position:absolute; top:10px; left:10px; z-index:1000; background:white; padding:6px 8px; box-shadow:0 0 6px rgba(0,0,0,0.2); border-radius:4px; }
+    #progress { font-size:12px; margin-top:4px; display:none; }
+    .sidebar { position:absolute; top:10px; right:10px; z-index:1000; width:360px; max-height:88vh; overflow:auto; background:rgba(255,255,255,0.97); padding:10px; box-shadow:0 0 6px rgba(0,0,0,0.2); border-radius:4px; }
+    .sidebar h3 { margin:0 0 6px; }
+    table { width:100%; border-collapse:collapse; font-size:12px; }
+    th, td { border:1px solid #aaa; padding:4px; text-align:left; }
+    .btn { padding:4px 8px; margin-right:4px; background:#1976d2; color:white; border:none; border-radius:3px; cursor:pointer; font-size:12px; }
+    .btn:disabled { background:#aaa; }
+    .section-title { font-weight:bold; margin:8px 0 4px; }
+  </style>
+</head>
+<body>
+  <div id="topbar">
+    <input type="file" id="csvFile" accept=".csv"/>
+    <button id="downloadSelected" class="btn" disabled>Download Selected CSV</button>
+    <div id="progress"></div>
+  </div>
+  <div id="map"></div>
+  <div class="sidebar" id="info" style="display:none;">
+    <h3>Selection <button id="toggleSummary" class="btn" style="float:right; padding:2px 6px;">Hide Summary</button></h3>
+    <div id="counts"></div>
+    <div id="summary"></div>
+    <div id="tableContainer"></div>
+  </div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Turf.js/6.5.0/turf.min.js"></script>
+
+  <script>
+    const RATE_LIMIT = 1100, CENTER = [46.8772, -96.7898];
+    const DEFAULT_CATEGORICAL = ['grade','school','PROGRAM','ELL','IEP'];
+    let markers = [], rows = [], selectedRows = [], layers = L.featureGroup();
+
+    const map = L.map('map').setView(CENTER, 11);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{ attribution:'&copy; OSM contributors' }).addTo(map);
+    layers.addTo(map);
+    const drawControl = new L.Control.Draw({
+      draw:{ polygon:true, rectangle:true, marker:false, circle:false, polyline:false },
+      edit:{ featureGroup: layers, edit:true, remove:true }
+    });
+    map.addControl(drawControl);
+    map.on(L.Draw.Event.CREATED, e => { layers.addLayer(e.layer); updateSelection(); });
+    map.on(L.Draw.Event.EDITED, updateSelection);
+    map.on(L.Draw.Event.DELETED, updateSelection);
+
+    document.getElementById('csvFile').addEventListener('change', e => {
+      const f = e.target.files[0]; if (!f) return;
+      Papa.parse(f, { header:true, skipEmptyLines:true, complete: async res => {
+        clearAll(); rows = res.data;
+        if (!rows.length) { alert('Empty CSV'); return; }
+        const cols = Object.keys(rows[0]);
+        const latKey = cols.find(c=>/^(lat|latitude|y)$/i.test(c)),
+              lonKey = cols.find(c=>/^(lon|lng|longitude|x)$/i.test(c));
+        if (latKey && lonKey) {
+          addLatLon(rows, latKey, lonKey);
+          map.fitBounds(L.featureGroup(markers).getBounds().pad(0.1));
+        } else {
+          const up=cols.map(c=>c.toUpperCase());
+          if (!['ADDRESS','CITY','STATE','ZIP'].every(x=>up.includes(x))){
+            alert('Need LAT/LON or ADDRESS,CITY,STATE,ZIP'); return;
+          }
+          await geocode(rows, cols[up.indexOf('ADDRESS')], cols[up.indexOf('CITY')],
+                        cols[up.indexOf('STATE')], cols[up.indexOf('ZIP')]);
+          map.fitBounds(L.featureGroup(markers).getBounds().pad(0.1));
+        }
+        alert(markers.length+' points loaded');
+      }});
+    });
+
+    function clearAll(){
+      markers.forEach(m=>map.removeLayer(m));
+      markers = []; rows = []; selectedRows = []; layers.clearLayers();
+      document.getElementById('info').style.display='none';
+      document.getElementById('downloadSelected').disabled = true;
+    }
+    function addLatLon(data, yKey, xKey){
+      data.forEach(r=>{
+        const lat = parseFloat(r[yKey]), lon = parseFloat(r[xKey]);
+        if (isFinite(lat) && isFinite(lon) && lat && lon) {
+          const m = L.circleMarker([lat, lon], { radius:4 }).addTo(map);
+          m.feature = r; markers.push(m);
+        }
+      });
+    }
+    async function geocode(data, aK, cK, sK, zK){
+      const p=document.getElementById('progress'); p.style.display='block';
+      for (let i=0; i<data.length; i++){
+        p.textContent = `Geocoding ${i+1}/${data.length}`;
+        const r=data[i], q=[r[aK],r[cK],r[sK],r[zK]].filter(Boolean).join(', ');
+        try {
+          const j = await fetch('https://nominatim.openstreetmap.org/search?format=json&limit=1&q='+encodeURIComponent(q))
+            .then(x=>x.json());
+          if (j.length){
+            const lat=+j[0].lat, lon=+j[0].lon;
+            const m=L.circleMarker([lat, lon], {radius:4}).addTo(map);
+            m.feature=r; markers.push(m);
+          }
+        } catch { }
+        await new Promise(r=>setTimeout(r, RATE_LIMIT));
+      }
+      p.style.display='none';
+    }
+    function updateSelection(){
+      selectedRows = [];
+      layers.getLayers().forEach(sh => {
+        const poly = sh.toGeoJSON();
+        markers.forEach(m => {
+          const pt = turf.point([m.getLatLng().lng, m.getLatLng().lat]);
+          if (turf.booleanPointInPolygon(pt, poly)) selectedRows.push(m.feature);
+        });
+      });
+      renderUI();
+    }
+    function renderUI(){
+      const info = document.getElementById('info');
+      if (!selectedRows.length) { info.style.display='none'; return; }
+      info.style.display='block';
+      document.getElementById('downloadSelected').disabled = false;
+      document.getElementById('counts').innerText = 'Total: '+selectedRows.length;
+      // summary
+      const cols = Object.keys(selectedRows[0]);
+      let cats = DEFAULT_CATEGORICAL.filter(c => cols.includes(c));
+      if (!cats.length){
+        cats = cols.filter(c=>{
+          const vals = selectedRows.map(r=>r[c]).filter(v=>v!=null);
+          return vals.length && new Set(vals).size<=15 && vals.some(v=>isNaN(v));
+        });
+      }
+      let sumHTML = '<div class="section-title">Summary</div>';
+      cats.forEach(c => {
+        const freq = {};
+        selectedRows.forEach(r=>freq[r[c]]=(freq[r[c]]||0)+1);
+        sumHTML += '<div><strong>'+c+'</strong><ul>';
+        Object.entries(freq).forEach(([k,v])=>sumHTML+=`<li>${k}: ${v}</li>`);
+        sumHTML += '</ul></div>';
+      });
+      document.getElementById('summary').innerHTML = sumHTML;
+      // table
+      let table = '<table><thead><tr>';
+      cols.forEach(h=>table+=`<th>${h}</th>`);
+      table += '</tr></thead><tbody>';
+      selectedRows.forEach(r=>{
+        table += '<tr>'; cols.forEach(h=>table+=`<td>${r[h]||''}</td>`); table+='</tr>';
+      });
+      table += '</tbody></table>';
+      document.getElementById('tableContainer').innerHTML = table;
+    }
+    document.getElementById('downloadSelected').onclick = ()=>{
+      const csv = Papa.unparse(selectedRows);
+      const blob = new Blob([csv], {type:'text/csv'});
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href=url; a.download='selection.csv'; a.click();
+      URL.revokeObjectURL(url);
+    };
+    document.getElementById('toggleSummary').onclick = e=>{
+      const s=document.getElementById('summary');
+      if (s.style.display==='none'){ s.style.display='block'; e.target.innerText='Hide Summary'; }
+      else { s.style.display='none'; e.target.innerText='Show Summary'; }
+    };
+  </script>
+</body>
+</html>
