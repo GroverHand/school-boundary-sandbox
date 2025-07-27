@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>School Boundary Sandbox - Enhanced</title>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css"/>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.css"/>
+  <style>
+    html, body { height:100%; margin:0; font-family: Arial, sans-serif; }
+    #map { position:absolute; top:50px; bottom:0; left:0; right:300px; }
+    #topbar { position:absolute; top:0; left:0; right:300px; height:50px; background:#f8f8f8; border-bottom:1px solid #ddd; padding:5px; display:flex; align-items:center; gap:10px; }
+    #sidebar { position:absolute; top:0; right:0; width:300px; height:100%; background:#fff; border-left:1px solid #ddd; display:flex; flex-direction:column; }
+    #tabs { display:flex; }
+    .tab { flex:1; padding:10px; text-align:center; cursor:pointer; border-bottom:2px solid transparent; }
+    .tab.active { border-bottom:2px solid #1976d2; font-weight:bold; }
+    .panel { flex:1; overflow:auto; padding:10px; display:none; }
+    .panel.active { display:block; }
+    table { width:100%; border-collapse:collapse; font-size:12px; }
+    th, td { border:1px solid #aaa; padding:4px; text-align:left; }
+    .btn { padding:4px 8px; background:#1976d2; color:#fff; border:none; border-radius:3px; cursor:pointer; }
+    .btn:disabled { background:#aaa; }
+    label { font-size:12px; }
+    select, input[type=text] { font-size:12px; }
+    #legend { list-style:none; padding:0; }
+    #legend li { margin:4px 0; display:flex; align-items:center; gap:6px; }
+    .color-box { width:16px; height:16px; display:inline-block; }
+  </style>
+</head>
+<body>
+  <div id="topbar">
+    <input type="file" id="csvFile" accept=".csv"/>
+    <label>Geocoder:
+      <select id="geocoderSelect">
+        <option value="nominatim">Nominatim (default)</option>
+        <option value="google">Google (API key below)</option>
+        <option value="mapbox">Mapbox (API key below)</option>
+      </select>
+    </label>
+    <input type="text" id="apiKey" placeholder="API key" style="display:none; width:200px;"/>
+    <label>Color by:
+      <select id="colorField"></select>
+    </label>
+    <button class="btn" id="exportZones" disabled>Export Zones</button>
+    <input type="file" id="importZones" accept=".geojson" style="display:none;"/>
+    <button class="btn" id="importZonesBtn">Import Zones</button>
+  </div>
+  <div id="map"></div>
+  <div id="sidebar">
+    <div id="tabs">
+      <div class="tab active" data-panel="summaryPanel">Summary</div>
+      <div class="tab" data-panel="zonesPanel">Zones</div>
+      <div class="tab" data-panel="legendPanel">Legend</div>
+    </div>
+    <div id="summaryPanel" class="panel active">
+      <div id="overallCounts"></div>
+      <div id="overallSummary"></div>
+    </div>
+    <div id="zonesPanel" class="panel">
+      <ul id="zoneList"></ul>
+      <button class="btn" id="downloadAllZones" disabled>Download All Zones CSV</button>
+    </div>
+    <div id="legendPanel" class="panel">
+      <ul id="legend"></ul>
+    </div>
+  </div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Turf.js/6.5.0/turf.min.js"></script>
+  <script>
+    // Config
+    const RATE = 1100;
+    const CENTER = [46.8772, -96.7898];
+    let geocoderType = 'nominatim';
+    let apiKey = '';
+    let rows = [], markers = [], shapes = L.featureGroup(), colorScale = {}, fields = [];
+
+    // Map setup
+    const map = L.map('map').setView(CENTER, 11);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution:'&copy; OSM contrib' }).addTo(map);
+    shapes.addTo(map);
+    const drawCtl = new L.Control.Draw({
+      draw:{polygon:true,rectangle:true}, edit:{featureGroup:shapes}
+    });
+    map.addControl(drawCtl);
+    map.on('draw:created draw:edited draw:deleted', updateAll);
+
+    // UI elements
+    const fileInput = document.getElementById('csvFile');
+    const geocodeSelect = document.getElementById('geocoderSelect');
+    const apiKeyInput = document.getElementById('apiKey');
+    const colorFieldSelect = document.getElementById('colorField');
+    const exportZonesBtn = document.getElementById('exportZones');
+    const importZonesBtn = document.getElementById('importZonesBtn');
+    const importZonesInput = document.getElementById('importZones');
+    const tabs = document.querySelectorAll('.tab');
+    const panels = document.querySelectorAll('.panel');
+    const overallCounts = document.getElementById('overallCounts');
+    const overallSummary = document.getElementById('overallSummary');
+    const zoneList = document.getElementById('zoneList');
+    const legendEl = document.getElementById('legend');
+    const downloadZonesCsv = document.getElementById('downloadAllZones');
+
+    // Events
+    fileInput.addEventListener('change', loadCSV);
+    geocodeSelect.addEventListener('change', () => {
+      geocoderType = geocodeSelect.value;
+      apiKeyInput.style.display = geocoderType==='nominatim'? 'none':'inline-block';
+    });
+    apiKeyInput.addEventListener('input', () => apiKey = apiKeyInput.value.trim());
+    exportZonesBtn.addEventListener('click', () => {
+      const geojson = shapes.toGeoJSON();
+      const blob = new Blob([JSON.stringify(geojson)], {type:'application/geo+json'});
+      const a = document.createElement('a');
+      a.href=URL.createObjectURL(blob); a.download='zones.geojson'; a.click();
+    });
+    importZonesBtn.addEventListener('click', () => importZonesInput.click());
+    importZonesInput.addEventListener('change', () => {
+      const f = importZonesInput.files[0]; if(!f) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        shapes.clearLayers();
+        L.geoJSON(JSON.parse(reader.result)).eachLayer(l => shapes.addLayer(l));
+        updateAll();
+      };
+      reader.readAsText(f);
+    });
+    tabs.forEach(t => t.addEventListener('click', () => {
+      tabs.forEach(x=>x.classList.remove('active'));
+      panels.forEach(p=>p.classList.remove('active'));
+      t.classList.add('active');
+      document.getElementById(t.dataset.panel).classList.add('active');
+    }));
+    downloadZonesCsv.addEventListener('click', () => {
+      shapes.getLayers().forEach((sh, i) => {
+        let sel = getSelected(sh);
+        if(!sel.length) return;
+        const csv = Papa.unparse(sel);
+        const a = document.createElement('a');
+        a.href=URL.createObjectURL(new Blob([csv], {type:'text/csv'}));
+        a.download=`zone-${i+1}.csv`; a.click();
+      });
+    });
+
+    // Load CSV & init
+    async function loadCSV(){
+      clearAll();
+      const f = fileInput.files[0];
+      const res = await new Promise(r => Papa.parse(f, {header:true, skipEmptyLines:true, complete:r}));
+      rows = res.data;
+      if(!rows.length) return alert('Empty CSV');
+      fields = Object.keys(rows[0]);
+      initColorField();
+      if(hasLatLon(rows[0])) {
+        addMarkers(rows);
+        map.fitBounds(L.featureGroup(markers).getBounds().pad(0.1));
+      } else {
+        await geocodeAll(rows);
+        map.fitBounds(L.featureGroup(markers).getBounds().pad(0.1));
+      }
+      updateAll();
+      exportZonesBtn.disabled=false;
+      downloadZonesCsv.disabled=false;
+    }
+
+    function hasLatLon(r){
+      return ['lat','latitude','y'].some(k=>r.hasOwnProperty(k)) && ['lon','lng','x'].some(k=>r.hasOwnProperty(k));
+    }
+
+    function initColorField(){
+      colorFieldSelect.innerHTML = '<option value="">-- none --</option>';
+      fields.forEach(f => {
+        colorFieldSelect.innerHTML += `<option value="${f}">${f}</option>`;
+      });
+      colorFieldSelect.addEventListener('change', () => updateAll());
+    }
+
+    function clearAll(){
+      markers.forEach(m=>map.removeLayer(m));
+      markers=[]; shapes.clearLayers();
+    }
+
+    function addMarkers(data){
+      data.forEach(r => {
+        const lat = parseFloat(r.lat||r.latitude||r.Y);
+        const lon = parseFloat(r.lon||r.lng||r.X);
+        if(isFinite(lat)&&isFinite(lon)){
+          const m = L.circleMarker([lat,lon],{radius:5});
+          m.feature=r; m.addTo(map); markers.push(m);
+        }
+      });
+    }
+
+    async function geocodeAll(data){
+      for(let i=0; i<data.length; i++){
+        const r=data[i];
+        const addr = `${r.ADDRESS}, ${r.CITY}, ${r.STATE}, ${r.ZIP}`;
+        let loc = null;
+        if(geocoderType==='nominatim'){
+          const j = await fetch(`https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(addr)}`)
+            .then(x=>x.json());
+          if(j.length) loc={lat:+j[0].lat, lon:+j[0].lon};
+        }
+        // TODO: add Mapbox/Google branches
+        if(loc){
+          const m = L.circleMarker([loc.lat,loc.lon],{radius:5});
+          m.feature=r; m.addTo(map); markers.push(m);
+        }
+        await new Promise(r=>setTimeout(r, RATE));
+      }
+    }
+
+    function updateAll(){
+      applyColors();
+      renderSummary();
+      renderZones();
+      renderLegend();
+    }
+
+    function applyColors(){
+      const field = colorFieldSelect.value;
+      if(!field){ markers.forEach(m=>m.setStyle({fillColor:'#3388ff', color:'#3388ff'})); return; }
+      const uniq = [...new Set(markers.map(m=>m.feature[field]))];
+      uniq.forEach((v,i) => colorScale[v] = `hsl(${(i*360/uniq.length).toFixed(0)},60%,50%)`);
+      markers.forEach(m => {
+        const c = colorScale[m.feature[field]] || '#3388ff';
+        m.setStyle({fillColor:c, color:c});
+      });
+    }
+
+    function renderSummary(){
+      overallCounts.innerText = `Total points: ${markers.length}`;
+      const field = colorFieldSelect.value;
+      let html = '';
+      fields.forEach(f => {
+        const freq = {};
+        markers.forEach(m => { const v=m.feature[f]; freq[v]=(freq[v]||0)+1; });
+        html += `<div class="section-title">${f}</div><ul>`;
+        Object.entries(freq).forEach(([k,v]) => html+=`<li>${k}: ${v}</li>`);
+        html+=`</ul>`;
+      });
+      overallSummary.innerHTML = html;
+    }
+
+    function renderZones(){
+      zoneList.innerHTML = '';
+      shapes.getLayers().forEach((sh,i) => {
+        const sel = getSelected(sh);
+        const li = document.createElement('li');
+        li.innerHTML = `<strong>Zone ${i+1}</strong>: ${sel.length} pts`;
+        zoneList.appendChild(li);
+      });
+    }
+
+    function getSelected(shape){
+      const poly = shape.toGeoJSON();
+      return markers.filter(m => turf.booleanPointInPolygon(turf.point([m.getLatLng().lng,m.getLatLng().lat]), poly))
+        .map(m=>m.feature);
+    }
+
+    function renderLegend(){
+      legendEl.innerHTML = '';
+      const field = colorFieldSelect.value;
+      if(!field) return;
+      Object.entries(colorScale).forEach(([v,c]) => {
+        const li = document.createElement('li');
+        li.innerHTML = `<span class="color-box" style="background:${c}"></span>${v}`;
+        legendEl.appendChild(li);
+      });
+    }
+  </script>
+</body>
+</html>
