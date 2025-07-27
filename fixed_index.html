@@ -45,10 +45,21 @@
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{attribution:'© OSM'}).addTo(map);
     shapes.addTo(map);
     const drawCtrl=new L.Control.Draw({
-      draw:{polygon:true,rectangle:true,marker:false,circle:false,polyline:false},
-      edit:{featureGroup:shapes,edit:true,remove:true}
-    });
-    map.addControl(drawCtrl);
+     <!-- Load libraries from cdnjs -->
+  <link
+    rel="stylesheet"
+    href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css"
+  />
+  <link
+    rel="stylesheet"
+    href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.css"
+  />
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Turf.js/6.5.0/turf.min.js"></script>
+
     map.on(L.Draw.Event.CREATED,e=>{shapes.addLayer(e.layer);update();});
     map.on(L.Draw.Event.EDITED,update);
     map.on(L.Draw.Event.DELETED,update);
